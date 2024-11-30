@@ -9,6 +9,8 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 
+use super::multiproofs;
+
 /// Convenience type for a Merkle proof and the root of the Merkle tree, which serves as
 /// "witness" that the proof is valid.
 pub type ProofAndWitness = (Proof, Node);
@@ -165,6 +167,32 @@ pub trait Prove: GeneralizedIndexable {
         prover.compute_proof(self)?;
         Ok(prover.into())
     }
+
+    /// Compute a Multi Merkle proof of `Self` at the type's `paths`, along with the root of the
+    /// Merkle tree as a witness value.
+    fn multi_prove(&self, paths: &[Path]) -> Result<(MultiProof, Node), Error> {
+        let indices: Vec<GeneralizedIndex> =
+            paths.iter().map(|x| Self::generalized_index(x).unwrap()).collect();
+        let helpers = multiproofs::get_helper_indices(&indices);
+        let mut proof = MultiProof { leaves: vec![], branch: vec![], indices: vec![] };
+        let mut witness: Node = Node::ZERO;
+
+        for index in indices.iter() {
+            let mut prover = Prover::from(*index);
+            prover.compute_proof(self)?;
+            proof.leaves.push(prover.proof.leaf);
+            proof.indices.push(prover.proof.index);
+            witness = prover.witness;
+        }
+
+        for helper in helpers.iter() {
+            let mut prover = Prover::from(*helper);
+            prover.compute_proof(self)?;
+            proof.branch.push(prover.proof.leaf);
+        }
+
+        Ok((proof, witness))
+    }
 }
 
 /// Contains data necessary to verify `leaf` was included under some witness "root" node
@@ -182,6 +210,24 @@ impl Proof {
     /// See `Prover` for further information.
     pub fn verify(&self, root: Node) -> Result<(), Error> {
         is_valid_merkle_branch_for_generalized_index(self.leaf, &self.branch, self.index, root)
+    }
+}
+
+/// Contains data necessary to verify `leaf` was included under some witness "root" node
+/// at the generalized position `index`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MultiProof {
+    pub leaves: Vec<Node>,
+    pub branch: Vec<Node>,
+    pub indices: Vec<GeneralizedIndex>,
+}
+
+impl MultiProof {
+    /// Verify `self` against the provided `root` witness node.
+    /// This `root` is the hash tree root of the SSZ object that produced the proof.
+    /// See `Prover` for further information.
+    pub fn verify(&self, root: Node) -> Result<(), Error> {
+        multiproofs::verify_merkle_multiproof(&self.leaves, &self.branch, &self.indices, root)
     }
 }
 
@@ -363,5 +409,24 @@ pub(crate) mod tests {
 
         let data = false;
         compute_and_verify_proof_for_path(&data, &[]);
+    }
+
+    #[test]
+    fn test_generate_multi_proofs() {
+        #[derive(PartialEq, Eq, Debug, Default, SimpleSerialize)]
+        struct TestContainer {
+            a: u64,
+            b: List<u8, 16>,
+            c: u8,
+        }
+        let data = TestContainer {
+            a: 18745094,
+            b: List::<u8, 16>::try_from(vec![200, 50, 40, 80]).unwrap(),
+            c: 240,
+        };
+
+        let (proof, witness) =
+            data.multi_prove(&[&["a".into()], &["b".into(), 0.into()], &["c".into()]]).unwrap();
+        assert!(proof.verify(witness).is_ok());
     }
 }
